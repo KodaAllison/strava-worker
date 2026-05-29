@@ -4,7 +4,7 @@
 # tells Cloudflare one fact about how to run this Worker.
 # ─────────────────────────────────────────────────────────────────────────────
 
-name = "strava-worker"          # the Worker's name → strava-worker.<you>.workers.dev
+name = "strava-data"            # the Worker's name → strava-data.<you>.workers.dev
 main = "src/index.js"           # the entry file the runtime loads
 compatibility_date = "2026-05-01"  # pins Worker runtime behavior to a known date
 
