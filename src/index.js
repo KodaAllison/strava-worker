@@ -56,13 +56,17 @@ export default {
   // ctx.waitUntil keeps the Worker alive until the async work finishes — without
   // it, the runtime might tear down before the KV write completes.
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(
-      (async () => {
-        const data = await syncStrava(env);
-        await env.STRAVA_KV.put(KV_KEY, JSON.stringify(data));
-        console.log(`[scheduled] wrote ${KV_KEY} at ${data.generated_at}`);
-      })()
-    );
+    // Await the work directly: the runtime keeps a cron invocation alive until
+    // scheduled() resolves. (ctx.waitUntil is for backgrounding work past a
+    // fetch() response — here it would let the handler return before the KV
+    // write finished, and the run would be cancelled mid-flight.)
+    //
+    // Reuse the last run's PRs as the merge baseline so older PBs + curated notes
+    // survive; on the very first run KV is empty and syncStrava uses DEFAULT_PRS.
+    const prev = await env.STRAVA_KV.get(KV_KEY, "json");
+    const data = await syncStrava(env, prev?.personal_records ?? DEFAULT_PRS);
+    await env.STRAVA_KV.put(KV_KEY, JSON.stringify(data));
+    console.log(`[scheduled] wrote ${KV_KEY} at ${data.generated_at}`);
   },
 };
 
@@ -118,7 +122,90 @@ function isoWeekMonday(date) {
   return d;
 }
 
-async function syncStrava(env) {
+// ─────────────────────────────────────────────────────────────────────────────
+// Personal records (PRs). Ported from the portfolio's old scripts/sync-prs.mjs —
+// the GitHub Action we retired. Strava only exposes `best_efforts` on the DETAILED
+// activity, and flags pr_rank === 1 on the one holding the current all-time PR. So
+// we detail-fetch recent qualifying runs and look for that flag.
+//
+// We do NOT rediscover all-time PBs every run. Instead we MERGE newly-found PRs
+// over a baseline (the previous KV blob, falling back to DEFAULT_PRS). That keeps
+// older PBs + their curated notes, and keeps the per-run subrequest count small.
+// ─────────────────────────────────────────────────────────────────────────────
+const PR_DISTANCE_MAP = { "5k": "5K", "10k": "10K", "half-marathon": "Half", "marathon": "Marathon" };
+const PR_ORDER = ["5K", "10K", "Half", "Marathon"];
+// Min activity distance (m) that could contain each PR — skip detail fetches for shorter runs.
+const PR_MIN_DIST = { "5K": 4800, "10K": 9800, "Half": 20800, "Marathon": 41800 };
+const PR_LOOKBACK_DAYS = 90;
+
+// Seed used the first time the Worker runs, before KV holds any PRs. These are the
+// curated all-time PBs/notes lifted from the portfolio's old src/data/run.json.
+const DEFAULT_PRS = [
+  { distance: "5K",       time: "23:28",   date: "2024-10-25", note: "Afternoon Run" },
+  { distance: "10K",      time: "51:18",   date: "2025-02-19", note: "Morning Run" },
+  { distance: "Half",     time: "1:55:06", date: "2025-11-16", note: "Alton Towers Half" },
+  { distance: "Marathon", time: "4:11:11", date: "2025-03-16", note: "Barcelona Marathon" },
+];
+
+function secondsToTime(s) {
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  return h > 0
+    ? `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`
+    : `${m}:${String(sec).padStart(2, "0")}`;
+}
+
+// Detail-fetch recent qualifying runs and collect Strava-flagged PRs (pr_rank===1).
+// `runs` is reused from syncStrava's 112-day list, so this adds only detail calls.
+async function findPRs(runs, token) {
+  const minTarget = Math.min(...Object.values(PR_MIN_DIST));
+  const cutoff = Date.now() - PR_LOOKBACK_DAYS * 24 * 60 * 60 * 1000;
+  const candidates = runs.filter(
+    (a) => a.distance >= minTarget && new Date(a.start_date).getTime() >= cutoff
+  );
+
+  const found = {}; // label → { time, date, note }
+  const BATCH = 5;  // small batches keep us friendly to Strava's rate limit
+  for (let i = 0; i < candidates.length; i += BATCH) {
+    const batch = await Promise.all(
+      candidates.slice(i, i + BATCH).map((a) =>
+        fetch(`${STRAVA_API}/activities/${a.id}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+          .then((r) => (r.ok ? r.json() : null))
+          .catch(() => null)
+      )
+    );
+    for (const detail of batch) {
+      if (!detail?.best_efforts) continue;
+      for (const effort of detail.best_efforts) {
+        const label = PR_DISTANCE_MAP[effort.name?.toLowerCase()];
+        if (!label || effort.pr_rank !== 1 || found[label]) continue;
+        found[label] = {
+          time: secondsToTime(effort.elapsed_time),
+          date: effort.start_date.slice(0, 10),
+          note: detail.name ?? "",
+        };
+      }
+    }
+  }
+  return found;
+}
+
+// Merge found PRs over a baseline, preserving older PBs and curated notes.
+function mergePRs(baseline, found) {
+  return baseline
+    .map((existing) => {
+      const pr = found[existing.distance];
+      if (!pr) return existing;
+      if (pr.time === existing.time && pr.date === existing.date) return existing;
+      return { distance: existing.distance, time: pr.time, date: pr.date, note: pr.note || existing.note };
+    })
+    .sort((a, b) => PR_ORDER.indexOf(a.distance) - PR_ORDER.indexOf(b.distance));
+}
+
+async function syncStrava(env, baselinePRs = DEFAULT_PRS) {
   const token = await getAccessToken(env);
 
   // 112 days covers 16 full weeks
@@ -225,6 +312,11 @@ async function syncStrava(env) {
   const rest_days = dayKm.filter((km) => km === 0).length;
   const longest_km = Math.max(...dayKm).toFixed(1);
 
+  // ── Personal records — merge any newly-set PRs over the baseline ─────────────
+  const found = await findPRs(runs, token);
+  const personal_records = mergePRs(baselinePRs, found);
+  const marathon_pb = personal_records.find((p) => p.distance === "Marathon")?.time ?? null;
+
   return {
     generated_at: new Date().toISOString(),
     weekly_km,
@@ -237,5 +329,7 @@ async function syncStrava(env) {
     streak,
     rest_days,
     longest_km,
+    personal_records,
+    marathon_pb,
   };
 }

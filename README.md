@@ -84,8 +84,21 @@ Gives you `https://strava-worker.<you>.workers.dev`. Watch live logs with
 ---
 
 ## TODO / next session
-- [ ] Port the real Strava logic from the portfolio's `src/lib/strava.js` into
-      `syncStrava()` in `src/index.js` (currently a stub).
-- [ ] Point the portfolio at `/data` and remove its direct Strava fetch +
-      `STRAVA_*` env vars.
-- [ ] Retire the old `sync-strava-prs.yml` GitHub Action.
+- [x] Port the real Strava logic from the portfolio's `src/lib/strava.js` into
+      `syncStrava()` in `src/index.js`.
+- [x] Deploy. Live at `https://strava-data.strava-data.workers.dev`. Cron is
+      `0 6 * * SUN` (Cloudflare's DOW is 1-7 = Sun-Sat; `0` is rejected).
+- [x] Set prod secrets (`STRAVA_CLIENT_ID/SECRET/REFRESH_TOKEN`) and seed KV via
+      `wrangler dev --remote --test-scheduled`. `/data` serves real data.
+- [x] Point the portfolio at `https://strava-data.strava-data.workers.dev/data`
+      (`src/lib/strava.js` is now a thin client; no `STRAVA_*` in the portfolio).
+- [x] Port the PR/best_efforts logic from `sync-prs.mjs` into the Worker, so
+      `/data` also returns `personal_records` + `marathon_pb` (merged over a KV
+      baseline). `run.json` keeps only manual config: training_state, next_race,
+      and the aspirational `goal` per PR.
+- [x] Retire the old `sync-strava-prs.yml` Action + delete `scripts/sync-prs.mjs`.
+
+## Still on you (can't be done from here)
+- [ ] Delete `STRAVA_CLIENT_ID/SECRET/REFRESH_TOKEN` from the portfolio's Vercel
+      project env vars and from the portfolio repo's GitHub Actions secrets.
+- [ ] Commit + push both repos.
