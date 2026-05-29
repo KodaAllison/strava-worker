@@ -86,8 +86,10 @@ Gives you `https://strava-worker.<you>.workers.dev`. Watch live logs with
 ## TODO / next session
 - [x] Port the real Strava logic from the portfolio's `src/lib/strava.js` into
       `syncStrava()` in `src/index.js`.
-- [x] Deploy. Live at `https://strava-data.strava-data.workers.dev`. Cron is
-      `0 6 * * SUN` (Cloudflare's DOW is 1-7 = Sun-Sat; `0` is rejected).
+- [x] Deploy. Live at `https://strava-data.strava-data.workers.dev`. Two crons:
+      `15 */3 * * *` (live stats, every 3h) and `0 6 * * SUN` (full sync incl. the
+      PB walk). Cloudflare's DOW is 1-7 = Sun-Sat; `0` is rejected. See
+      [ARCHITECTURE.md](ARCHITECTURE.md) for the full design.
 - [x] Set prod secrets (`STRAVA_CLIENT_ID/SECRET/REFRESH_TOKEN`) and seed KV via
       `wrangler dev --remote --test-scheduled`. `/data` serves real data.
 - [x] Point the portfolio at `https://strava-data.strava-data.workers.dev/data`
