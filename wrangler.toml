@@ -1,0 +1,27 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# wrangler.toml — the Worker's deployment config (Cloudflare's equivalent of the
+# stuff Vercel inferred for you automatically). Nothing here is magic; every line
+# tells Cloudflare one fact about how to run this Worker.
+# ─────────────────────────────────────────────────────────────────────────────
+
+name = "strava-worker"          # the Worker's name → strava-worker.<you>.workers.dev
+main = "src/index.js"           # the entry file the runtime loads
+compatibility_date = "2026-05-01"  # pins Worker runtime behavior to a known date
+
+# ── Cron Trigger ─────────────────────────────────────────────────────────────
+# This is Cloudflare's built-in scheduler. The cron string is identical to your
+# old GitHub Action (Sunday 06:00 UTC). When this fires, the runtime calls the
+# `scheduled()` handler in src/index.js — NOT `fetch()`.
+[triggers]
+crons = ["0 6 * * 0"]
+
+# ── KV namespace binding ─────────────────────────────────────────────────────
+# KV is Cloudflare's edge key-value store. `binding` is the variable name your
+# code sees as `env.STRAVA_KV`. The `id` points at the real namespace — you
+# create it once with:
+#     npx wrangler kv namespace create STRAVA_KV
+# then paste the printed id below. (Local `wrangler dev` simulates KV, so you can
+# run the dev server before doing this — it just won't persist to the cloud.)
+[[kv_namespaces]]
+binding = "STRAVA_KV"
+id = "REPLACE_WITH_KV_ID"

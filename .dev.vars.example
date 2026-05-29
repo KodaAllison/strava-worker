@@ -1,0 +1,7 @@
+# Copy this file to `.dev.vars` (which is gitignored) and fill in real values.
+# These are the LOCAL equivalent of Worker secrets — `wrangler dev` reads them so
+# you can test against real Strava without deploying. In production you set the
+# same names via:  npx wrangler secret put STRAVA_CLIENT_ID   (etc.)
+STRAVA_CLIENT_ID=
+STRAVA_CLIENT_SECRET=
+STRAVA_REFRESH_TOKEN=
