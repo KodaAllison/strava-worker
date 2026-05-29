@@ -24,4 +24,4 @@ crons = ["0 6 * * 0"]
 # run the dev server before doing this — it just won't persist to the cloud.)
 [[kv_namespaces]]
 binding = "STRAVA_KV"
-id = "REPLACE_WITH_KV_ID"
+id = "e7fa114265bd48e08a2282ffa978dbaf"

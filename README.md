@@ -56,8 +56,12 @@ npm run dev
 ```
 - Hit `http://localhost:8787/data` → expect a **503** ("no data yet"). Correct!
   The cron hasn't run, so KV is empty.
-- Trigger the cron manually (wrangler dev exposes this): visit
-  `http://localhost:8787/__scheduled` (or use the `--test-scheduled` flag).
+- Trigger the cron manually. `npm run dev` already passes `--test-scheduled`,
+  which exposes the trigger. Either:
+    • press the **`s`** key in the terminal running dev, or
+    • visit `http://localhost:8787/__scheduled`
+  (Without `--test-scheduled` that route doesn't exist — the request falls
+  through to `fetch()` and you get the 404. That flag is what registers it.)
 - Hit `/data` again → now you get the stub JSON. **You just watched the
   producer→KV→consumer loop work.** That's the checkpoint that matters.
 
