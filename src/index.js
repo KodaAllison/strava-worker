@@ -14,6 +14,11 @@
 
 const KV_KEY = "latest"; // the single key under which we store the computed blob
 
+// The cron string (must match wrangler.toml exactly) whose run does the full
+// sync including the personal-best walk. Every other trigger refreshes live
+// stats only and carries the previous PRs forward unchanged.
+const WEEKLY_CRON = "0 6 * * SUN";
+
 export default {
   // ── Entry point #1: HTTP ────────────────────────────────────────────────
   // The data CONSUMER side. Your portfolio (still on Vercel) calls GET /data
@@ -61,12 +66,18 @@ export default {
     // fetch() response — here it would let the handler return before the KV
     // write finished, and the run would be cancelled mid-flight.)
     //
-    // Reuse the last run's PRs as the merge baseline so older PBs + curated notes
-    // survive; on the very first run KV is empty and syncStrava uses DEFAULT_PRS.
+    // Only the weekly trigger walks personal bests (it's subrequest-heavy). Every
+    // other (3-hourly) trigger refreshes live stats and carries the previous PRs
+    // forward. We reuse the last run's PRs as the merge baseline so older PBs +
+    // curated notes survive; on the very first run KV is empty → DEFAULT_PRS.
+    const includePRs = event.cron === WEEKLY_CRON;
     const prev = await env.STRAVA_KV.get(KV_KEY, "json");
-    const data = await syncStrava(env, prev?.personal_records ?? DEFAULT_PRS);
+    const data = await syncStrava(env, {
+      baselinePRs: prev?.personal_records ?? DEFAULT_PRS,
+      includePRs,
+    });
     await env.STRAVA_KV.put(KV_KEY, JSON.stringify(data));
-    console.log(`[scheduled] wrote ${KV_KEY} at ${data.generated_at}`);
+    console.log(`[scheduled] cron="${event.cron}" prs=${includePRs} wrote ${KV_KEY} at ${data.generated_at}`);
   },
 };
 
@@ -205,7 +216,7 @@ function mergePRs(baseline, found) {
     .sort((a, b) => PR_ORDER.indexOf(a.distance) - PR_ORDER.indexOf(b.distance));
 }
 
-async function syncStrava(env, baselinePRs = DEFAULT_PRS) {
+async function syncStrava(env, { baselinePRs = DEFAULT_PRS, includePRs = true } = {}) {
   const token = await getAccessToken(env);
 
   // 112 days covers 16 full weeks
@@ -312,9 +323,13 @@ async function syncStrava(env, baselinePRs = DEFAULT_PRS) {
   const rest_days = dayKm.filter((km) => km === 0).length;
   const longest_km = Math.max(...dayKm).toFixed(1);
 
-  // ── Personal records — merge any newly-set PRs over the baseline ─────────────
-  const found = await findPRs(runs, token);
-  const personal_records = mergePRs(baselinePRs, found);
+  // ── Personal records ─────────────────────────────────────────────────────────
+  // The weekly run walks best_efforts and merges any newly-set PRs over the
+  // baseline. Frequent (live-stats) runs skip the walk entirely and carry the
+  // baseline forward unchanged — keeping them cheap and fast.
+  const personal_records = includePRs
+    ? mergePRs(baselinePRs, await findPRs(runs, token))
+    : baselinePRs;
   const marathon_pb = personal_records.find((p) => p.distance === "Marathon")?.time ?? null;
 
   return {

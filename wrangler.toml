@@ -9,15 +9,23 @@ main = "src/index.js"           # the entry file the runtime loads
 compatibility_date = "2026-05-01"  # pins Worker runtime behavior to a known date
 
 # ── Cron Trigger ─────────────────────────────────────────────────────────────
-# This is Cloudflare's built-in scheduler. Fires Sunday 06:00 UTC, same as your
-# old GitHub Action. When it fires, the runtime calls the `scheduled()` handler
-# in src/index.js — NOT `fetch()`.
+# Cloudflare's built-in scheduler. When a trigger fires, the runtime calls the
+# `scheduled()` handler in src/index.js (NOT `fetch()`), passing `event.cron` =
+# the exact string below, so the handler can tell which schedule fired.
+#
+# TWO cadences, because the two datasets change at very different rates:
+#   • "15 */3 * * *"  — every 3 hours (at :15). Refreshes LIVE STATS only
+#     (recent_activity, weekly_km, …). Cheap: ~4 Strava calls. The :15 offset
+#     keeps it from colliding with the weekly run at :00.
+#   • "0 6 * * SUN"   — Sunday 06:00 UTC. The FULL run: live stats PLUS the
+#     personal-best walk (subrequest-heavy detail fetches). See WEEKLY_CRON in
+#     src/index.js — that string is what flips on PR computation.
 #
 # NOTE: Cloudflare's cron is NOT standard crontab. Its day-of-week field is 1-7
 # where 1 = Sunday and 7 = Saturday — there is no `0`. Standard `0 6 * * 0` is
 # rejected with "invalid cron string [code: 10100]". Use SUN (or 1) for Sunday.
 [triggers]
-crons = ["0 6 * * SUN"]
+crons = ["15 */3 * * *", "0 6 * * SUN"]
 
 # ── KV namespace binding ─────────────────────────────────────────────────────
 # KV is Cloudflare's edge key-value store. `binding` is the variable name your
