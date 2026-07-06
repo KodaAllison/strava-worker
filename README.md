@@ -80,27 +80,3 @@ npm run deploy
 ```
 Gives you `https://strava-worker.<you>.workers.dev`. Watch live logs with
 `npm run tail`.
-
----
-
-## TODO / next session
-- [x] Port the real Strava logic from the portfolio's `src/lib/strava.js` into
-      `syncStrava()` in `src/index.js`.
-- [x] Deploy. Live at `https://strava-data.strava-data.workers.dev`. Two crons:
-      `15 */3 * * *` (live stats, every 3h) and `0 6 * * SUN` (full sync incl. the
-      PB walk). Cloudflare's DOW is 1-7 = Sun-Sat; `0` is rejected. See
-      [ARCHITECTURE.md](ARCHITECTURE.md) for the full design.
-- [x] Set prod secrets (`STRAVA_CLIENT_ID/SECRET/REFRESH_TOKEN`) and seed KV via
-      `wrangler dev --remote --test-scheduled`. `/data` serves real data.
-- [x] Point the portfolio at `https://strava-data.strava-data.workers.dev/data`
-      (`src/lib/strava.js` is now a thin client; no `STRAVA_*` in the portfolio).
-- [x] Port the PR/best_efforts logic from `sync-prs.mjs` into the Worker, so
-      `/data` also returns `personal_records` + `marathon_pb` (merged over a KV
-      baseline). `run.json` keeps only manual config: training_state, next_race,
-      and the aspirational `goal` per PR.
-- [x] Retire the old `sync-strava-prs.yml` Action + delete `scripts/sync-prs.mjs`.
-
-## Still on you (can't be done from here)
-- [ ] Delete `STRAVA_CLIENT_ID/SECRET/REFRESH_TOKEN` from the portfolio's Vercel
-      project env vars and from the portfolio repo's GitHub Actions secrets.
-- [ ] Commit + push both repos.
