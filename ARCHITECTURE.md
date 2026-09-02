@@ -83,8 +83,11 @@ The two datasets change at very different rates, so they run on different schedu
 
 | Cron | What runs | Cost | Why |
 |---|---|---|---|
-| `15 */3 * * *` (every 3h, :15) | Live stats only; PRs carried forward from the previous blob | ~4 Strava calls | `recent_activity`, `weekly_km`, streaks etc. change several times a week — they need to be fresh. |
-| `0 6 * * SUN` (Sun 06:00 UTC) | Full sync **including** the personal-best walk | ~4 + N detail fetches | `best_efforts` only appear on the *detailed* activity, so PRs need a per-activity fetch — subrequest-heavy, and PBs change rarely. |
+| `15 */3 * * *` (every 3h, :15) | Live stats only; PRs carried forward from the previous blob | ~5 Strava calls | `recent_activity`, `weekly_km`, streaks etc. change several times a week — they need to be fresh. |
+| `0 6 * * SUN` (Sun 06:00 UTC) | Full sync **including** the personal-best walk | ~5 + N detail fetches | `best_efforts` only appear on the *detailed* activity, so PRs need a per-activity fetch — subrequest-heavy, and PBs change rarely. |
+
+Both cadences also tail the monthly ledger (one request — or ~3 the first time,
+when it backfills). See below.
 
 The `:15` offset on the frequent run keeps it from colliding with the weekly run at
 `:00`. The string that flips on PR computation is `WEEKLY_CRON` in `src/index.js`
