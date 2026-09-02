@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev --test-scheduled",
+    "test": "node --test \"test/**/*.test.js\"",
     "deploy": "wrangler deploy",
     "tail": "wrangler tail"
   },

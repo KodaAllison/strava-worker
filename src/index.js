@@ -14,6 +14,12 @@
 
 const KV_KEY = "latest"; // the single key under which we store the computed blob
 
+// Second KV key: the monthly-volume ledger (running totals + backfill state).
+// It is deliberately NOT part of the "latest" blob — "latest" is a rendered
+// output that any run may overwrite, whereas this is accumulated state that must
+// survive every run. See the "Monthly running volume" section below.
+const MONTHLY_KEY = "monthly";
+
 // The cron string (must match wrangler.toml exactly) whose run does the full
 // sync including the personal-best walk. Every other trigger refreshes live
 // stats only and carries the previous PRs forward unchanged.
@@ -72,12 +78,33 @@ export default {
     // curated notes survive; on the very first run KV is empty → DEFAULT_PRS.
     const includePRs = event.cron === WEEKLY_CRON;
     const prev = await env.STRAVA_KV.get(KV_KEY, "json");
-    const data = await syncStrava(env, {
+
+    // One token for the whole run. It used to be minted inside syncStrava, but
+    // the monthly ledger below is a second producer that needs the same token —
+    // minting it once here keeps us to a single OAuth refresh per invocation.
+    const token = await getAccessToken(env);
+
+    // The monthly series is its own producer with its own KV key, so a bad day
+    // on that side can't cost us the live stats: if it throws we log it and
+    // carry the previous run's series forward unchanged. (Its own KV write is
+    // all-or-nothing, so a failure mid-backfill leaves the ledger untouched
+    // rather than half-written — the next cron simply retries.)
+    const monthly_km = await syncMonthlyKm(env, token).catch((err) => {
+      console.error(`[scheduled] monthly_km failed: ${err.message} — carrying the previous series forward`);
+      return prev?.monthly_km ?? [];
+    });
+
+    const stats = await syncStrava(env, {
+      token,
       baselinePRs: prev?.personal_records ?? DEFAULT_PRS,
       includePRs,
     });
+    const data = { ...stats, monthly_km };
+
     await env.STRAVA_KV.put(KV_KEY, JSON.stringify(data));
-    console.log(`[scheduled] cron="${event.cron}" prs=${includePRs} wrote ${KV_KEY} at ${data.generated_at}`);
+    console.log(
+      `[scheduled] cron="${event.cron}" prs=${includePRs} months=${monthly_km.length} wrote ${KV_KEY} at ${data.generated_at}`
+    );
   },
 };
 
@@ -106,6 +133,19 @@ async function getAccessToken(env) {
   if (!res.ok) throw new Error(`Strava token refresh failed: ${res.status}`);
   const { access_token } = await res.json();
   return access_token;
+}
+
+// The single definition of "does this count as running", shared by every
+// aggregation in this file so that weekly_bars and monthly_km can never disagree
+// about what a month contained.
+//
+// Strava reports BOTH fields: `type` is the legacy coarse bucket and
+// `sport_type` the modern granular one. A trail run comes back as
+// type="Run" / sport_type="TrailRun", so checking either field keeps trail runs
+// in the mileage while still excluding the hikes, swims, Hyrox and weight
+// training that share the account.
+export function isRun(activity) {
+  return activity.type === "Run" || activity.sport_type === "Run";
 }
 
 function paceString(movingTimeSec, distanceM) {
@@ -216,8 +256,10 @@ function mergePRs(baseline, found) {
     .sort((a, b) => PR_ORDER.indexOf(a.distance) - PR_ORDER.indexOf(b.distance));
 }
 
-async function syncStrava(env, { baselinePRs = DEFAULT_PRS, includePRs = true } = {}) {
-  const token = await getAccessToken(env);
+async function syncStrava(env, { token: sharedToken, baselinePRs = DEFAULT_PRS, includePRs = true } = {}) {
+  // scheduled() mints one token for the whole run and passes it in; the fallback
+  // keeps this function usable on its own (e.g. from a one-off script).
+  const token = sharedToken ?? (await getAccessToken(env));
 
   // 112 days covers 16 full weeks
   const windowStart = Math.floor((Date.now() - 112 * 24 * 60 * 60 * 1000) / 1000);
@@ -243,9 +285,7 @@ async function syncStrava(env, { baselinePRs = DEFAULT_PRS, includePRs = true } 
   if (!statsRes.ok) throw new Error(`Strava stats fetch failed: ${statsRes.status}`);
   const stats = await statsRes.json();
 
-  const runs = allActivities.filter(
-    (a) => a.type === "Run" || a.sport_type === "Run"
-  );
+  const runs = allActivities.filter(isRun);
 
   // ── Current week (Mon–Sun) ────────────────────────────────────────────────
   const now = new Date();
@@ -348,3 +388,236 @@ async function syncStrava(env, { baselinePRs = DEFAULT_PRS, includePRs = true } 
     marathon_pb,
   };
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Monthly running volume — the full-history series behind the homepage trace.
+//
+// Everything above works off a rolling 112-day window, which is all the live
+// stats need. This series is different in kind: it starts at the first run ever
+// and never forgets, so it can't be recomputed from a window on each run.
+//
+// It is therefore AGGREGATED ON WRITE into its own KV key and only *rendered*
+// into the "latest" blob — the page fetches ~2 KB and does no arithmetic. The
+// ledger lives under MONTHLY_KEY rather than inside "latest" because "latest" is
+// disposable output that any run overwrites, while this is accumulated state
+// that has to survive every run.
+//
+// Two modes, chosen by what's already in KV:
+//
+//   COLD — no ledger, or one written by an older schema → BACKFILL.
+//     /athlete/activities has no history limit, so we page backwards with a
+//     `before` cursor until Strava hands back an empty page. The whole account
+//     is ~244 activities ≈ 3 requests at 100/page, against a limit of 200 per
+//     15 minutes. This runs once, not on every cron.
+//
+//   WARM — ledger present and complete → TAIL.
+//     One request for everything since the start of the month the high-water
+//     mark falls in. Those months are then re-tallied from scratch rather than
+//     added to, which makes the update IDEMPOTENT: a retry, a distance
+//     corrected after the fact, or an activity deleted in Strava all land
+//     correctly, and nothing can be double-counted at the `after` boundary
+//     (whose inclusivity Strava does not document).
+//
+// The KV write happens once, at the end, with the complete ledger. A failure
+// part-way through the backfill therefore leaves the previous ledger (or no
+// ledger at all) untouched — never a permanently half-written series — and the
+// next cron simply retries.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Bump when the stored shape changes: an older version reads as COLD and is
+// re-backfilled rather than mis-parsed.
+const MONTHLY_STATE_VERSION = 1;
+const ACTIVITY_PAGE_SIZE = 100; // Strava allows up to 200; 100 keeps responses small
+const MAX_ACTIVITY_PAGES = 50;  // safety valve (5,000 activities) so a paging bug can't loop
+
+// Reads the ledger, brings it up to date, writes it back, and returns the dense
+// series that goes into the "latest" blob.
+async function syncMonthlyKm(env, token, now = new Date()) {
+  const state = await env.STRAVA_KV.get(MONTHLY_KEY, "json");
+  const warm =
+    state?.version === MONTHLY_STATE_VERSION &&
+    state.backfill_complete === true &&
+    typeof state.last_activity_at === "number" &&
+    !!state.totals;
+
+  let totals;
+  let activities;
+
+  if (warm) {
+    // Anchor the request at the first of the month the high-water mark sits in,
+    // so every month the window touches is covered end to end — that is what
+    // makes replacing those months (rather than adding to them) safe.
+    const anchor = startOfMonthEpoch(state.last_activity_at);
+    activities = await fetchActivities(token, { after: anchor });
+
+    // Clear every month the window can touch before re-tallying. The far end is
+    // normally the current month; taking the later of that and the newest month
+    // actually fetched means a future-dated activity gets its month reset too,
+    // rather than being added on top of a total we never cleared.
+    const from = monthKey(new Date(anchor * 1000));
+    const to = activities.reduce(
+      (latest, a) => (a.start_date.slice(0, 7) > latest ? a.start_date.slice(0, 7) : latest),
+      monthKey(now)
+    );
+
+    totals = { ...state.totals };
+    for (const month of monthSpan(from, to)) delete totals[month];
+    tallyMonths(activities, totals);
+  } else {
+    activities = await fetchActivities(token);
+    totals = tallyMonths(activities, {});
+  }
+
+  // High-water mark = newest activity seen, of ANY type. It only decides where
+  // the next tail starts, and a non-run is just as good a floor as a run — while
+  // ignoring non-runs here would re-walk months we have already settled.
+  const last_activity_at =
+    activities.reduce(
+      (max, a) => Math.max(max, epochSeconds(a.start_date)),
+      warm ? state.last_activity_at : 0
+    ) || Math.floor(now.getTime() / 1000);
+
+  await env.STRAVA_KV.put(
+    MONTHLY_KEY,
+    JSON.stringify({
+      version: MONTHLY_STATE_VERSION,
+      backfill_complete: true,
+      last_activity_at,
+      totals,
+      updated_at: now.toISOString(),
+    })
+  );
+
+  const series = toMonthlySeries(totals, now);
+  console.log(
+    `[monthly] ${warm ? "tail" : "backfill"} fetched=${activities.length} months=${series.length} mark=${last_activity_at}`
+  );
+  return series;
+}
+
+// Page through /athlete/activities newest-first behind a `before` cursor.
+// Pass `after` (epoch seconds) to bound how far back we walk; omit it and we
+// walk the entire history, which is exactly what the backfill wants.
+async function fetchActivities(token, { after } = {}) {
+  const all = [];
+  const seen = new Set();
+  let before = Math.floor(Date.now() / 1000) + 60; // cushion for clock skew
+
+  for (let page = 0; page < MAX_ACTIVITY_PAGES; page++) {
+    const params = new URLSearchParams({
+      per_page: String(ACTIVITY_PAGE_SIZE),
+      before: String(before),
+    });
+    if (after !== undefined) params.set("after", String(after));
+
+    const res = await fetch(`${STRAVA_API}/athlete/activities?${params}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) throw new Error(`Strava activities fetch failed: ${res.status}`);
+
+    const batch = await res.json();
+    if (!Array.isArray(batch) || batch.length === 0) return all; // empty page = end of history
+
+    // Strava does not document whether `before` is inclusive, so dedupe by id: a
+    // boundary activity repeating across pages is then harmless, and a page that
+    // adds nothing new tells us the cursor has stopped making progress.
+    let added = 0;
+    for (const activity of batch) {
+      if (seen.has(activity.id)) continue;
+      seen.add(activity.id);
+      all.push(activity);
+      added++;
+    }
+    if (added === 0) return all;
+    if (batch.length < ACTIVITY_PAGE_SIZE) return all; // short page = last page
+
+    // The oldest activity in this page becomes the next cursor.
+    before = batch.reduce((min, a) => Math.min(min, epochSeconds(a.start_date)), Infinity);
+  }
+
+  throw new Error(`Strava activity paging exceeded ${MAX_ACTIVITY_PAGES} pages`);
+}
+
+// Sum runs into { "YYYY-MM": { m, runs } }, mutating and returning `into` so the
+// warm path can tally straight onto a copy of the stored ledger.
+//
+// Metres are stored UNROUNDED and only rounded on the way out — rounding each
+// activity first would let a month's total drift by a few hundred metres.
+function tallyMonths(activities, into = {}) {
+  for (const activity of activities) {
+    if (!isRun(activity)) continue;
+    // start_date is ISO-8601 in UTC, so slicing it is the same UTC bucketing the
+    // week and day grids above use — the series cannot disagree with weekly_bars
+    // about which month a run landed in.
+    const month = activity.start_date.slice(0, 7);
+    const bucket = (into[month] ??= { m: 0, runs: 0 });
+    bucket.m += activity.distance;
+    bucket.runs += 1;
+  }
+  return into;
+}
+
+// Expand the sparse ledger into a DENSE, oldest-first array with no holes: every
+// calendar month from the first run to the current month gets a record, and a
+// month without runs is an explicit { km: 0, runs: 0 }.
+//
+// This is the whole point of the field. The consumer plots the array
+// positionally, so a missing month would not render as a gap — the x-axis would
+// silently close up and a two-month injury layoff would vanish from the curve.
+//
+// km is rounded to 1dp to match weekly_km / weekly_bars.
+function toMonthlySeries(totals, now = new Date()) {
+  const months = Object.keys(totals).sort();
+  if (months.length === 0) return [];
+
+  // Normally the last month IS the current one; the comparison only matters if a
+  // future-dated activity ever sneaks in, which would otherwise truncate it.
+  const current = monthKey(now);
+  const newest = months[months.length - 1];
+  const end = newest > current ? newest : current;
+
+  return monthSpan(months[0], end).map((month) => {
+    const bucket = totals[month];
+    return {
+      month,
+      km: bucket ? Math.round((bucket.m / 1000) * 10) / 10 : 0,
+      runs: bucket ? bucket.runs : 0,
+    };
+  });
+}
+
+// Every "YYYY-MM" from `first` to `last` inclusive. Plain integer arithmetic
+// rather than Date stepping, which trips over month lengths.
+function monthSpan(first, last) {
+  const months = [];
+  let [year, month] = first.split("-").map(Number);
+  const [lastYear, lastMonth] = last.split("-").map(Number);
+
+  while (year < lastYear || (year === lastYear && month <= lastMonth)) {
+    months.push(`${year}-${String(month).padStart(2, "0")}`);
+    if (++month > 12) {
+      month = 1;
+      year++;
+    }
+  }
+  return months;
+}
+
+// "YYYY-MM" for a Date, in UTC.
+function monthKey(date) {
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}`;
+}
+
+// Midnight UTC on the 1st of the month containing `epochSec`, as epoch seconds.
+function startOfMonthEpoch(epochSec) {
+  const d = new Date(epochSec * 1000);
+  return Math.floor(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1) / 1000);
+}
+
+function epochSeconds(isoDate) {
+  return Math.floor(new Date(isoDate).getTime() / 1000);
+}
+
+// Exported for the unit tests in test/ — the Worker runtime only ever uses the
+// default export at the top of the file.
+export { syncMonthlyKm, fetchActivities, tallyMonths, toMonthlySeries, monthSpan };
