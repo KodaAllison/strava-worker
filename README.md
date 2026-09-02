@@ -80,3 +80,18 @@ npm run deploy
 ```
 Gives you `https://strava-worker.<you>.workers.dev`. Watch live logs with
 `npm run tail`.
+
+---
+
+## Tests
+
+```bash
+npm test
+```
+
+Plain `node --test` — no framework, no Wrangler, no network. The aggregation
+maths is ordinary JS, so the tests stub `globalThis.fetch` with an activity
+fixture and hand the code an in-memory stand-in for the KV binding. That's enough
+to cover the parts worth guarding: the dense zero-filled `monthly_km` series, the
+backwards-paging backfill, and the fact that re-running the tail can't
+double-count. See `test/monthly.test.js`.
