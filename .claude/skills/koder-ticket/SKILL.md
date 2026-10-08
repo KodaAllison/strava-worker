@@ -24,7 +24,8 @@ on Koda's PC.
 
 The CLI needs `KODER_API` and `KODER_TOKEN` — from the environment, or from a
 `.koder.env` file next to the script (exists only on Koda's PC; never
-committed). In a cloud or mobile session they must come from the environment
+committed). Values set in the environment win; the file only fills in whichever
+is unset. In a cloud or mobile session they must come from the environment
 settings: if they're missing, stop and tell Koda to add both variables to the
 session's environment configuration — don't guess values or hunt for them.
 

@@ -32,21 +32,27 @@
 #   ./scripts/koder-ticket.sh delete KODER-X1Y2
 #
 # Config: KODER_API (server base URL) and KODER_TOKEN, from the environment
-# or from scripts/.koder.env (gitignored).
+# or from scripts/.koder.env (gitignored). The environment wins: the file only
+# fills in whichever of the two isn't already set.
 #
 # Any agent without this script can call the API directly — see server/README.md.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Sourcing .koder.env would clobber anything the caller exported (a test's
+# mock server, a one-off override), so note those first and put them back.
+ENV_API="${KODER_API:-}" ENV_TOKEN="${KODER_TOKEN:-}"
 # shellcheck source=/dev/null
 [ -f "$SCRIPT_DIR/.koder.env" ] && . "$SCRIPT_DIR/.koder.env"
+KODER_API="${ENV_API:-${KODER_API:-}}"
+KODER_TOKEN="${ENV_TOKEN:-${KODER_TOKEN:-}}"
 
 : "${KODER_API:?set KODER_API in the environment or scripts/.koder.env}"
 : "${KODER_TOKEN:?set KODER_TOKEN in the environment or scripts/.koder.env}"
 BASE="${KODER_API%/}"
 
-usage() { sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
+usage() { sed -n '2,37p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
 
 # request <method> <path> [json-body] → body on stdout; exits 1 on HTTP error.
 request() {
