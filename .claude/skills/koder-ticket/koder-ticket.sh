@@ -5,8 +5,14 @@
 # Usage:
 #   ./scripts/koder-ticket.sh "Fix login bug" [options]     add a ticket
 #   ./scripts/koder-ticket.sh list [options]                list tickets
-#   ./scripts/koder-ticket.sh move <id> <column>            move a ticket
-#   ./scripts/koder-ticket.sh edit <id> [options]           edit a ticket
+#   ./scripts/koder-ticket.sh move <ref|id> <column>        move a ticket
+#   ./scripts/koder-ticket.sh edit <ref|id> [options]       edit a ticket
+#   ./scripts/koder-ticket.sh delete <ref|id>               hard-delete a ticket
+#   ./scripts/koder-ticket.sh close <ref|id>                alias for delete
+#
+# Tickets have two names. The REF (KODER-8CDA) is what the board prints on
+# every card — quote that one to Koda. The ID (t_msa8scco_632be) is the
+# internal key. move, edit, delete, and close take either.
 #
 # Options (add / list / edit):
 #   --title "<text>"     ticket title (edit only — add takes it positionally)
@@ -21,8 +27,9 @@
 #
 # Examples:
 #   ./scripts/koder-ticket.sh list --project holitrackr --column todo
-#   ./scripts/koder-ticket.sh move t_abc123_x1y2z doing
+#   ./scripts/koder-ticket.sh move HOLIT-X1Y2 doing
 #   ./scripts/koder-ticket.sh edit t_abc123_x1y2z --priority high --note "repro in #42"
+#   ./scripts/koder-ticket.sh delete KODER-X1Y2
 #
 # Config: KODER_API (server base URL) and KODER_TOKEN, from the environment
 # or from scripts/.koder.env (gitignored).
@@ -39,7 +46,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${KODER_TOKEN:?set KODER_TOKEN in the environment or scripts/.koder.env}"
 BASE="${KODER_API%/}"
 
-usage() { sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
+usage() { sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
 
 # request <method> <path> [json-body] → body on stdout; exits 1 on HTTP error.
 request() {
@@ -60,6 +67,22 @@ request() {
     return 1
   fi
   cat "$resp"
+}
+
+# describe <response-json> <fallback> → "REF (id)" for the ticket a write
+# touched, or the fallback if the response didn't carry one. Parsed with node
+# for the same reason `list` is: a title containing a quote defeats sed.
+describe() {
+  printf '%s' "$1" | node -e '
+    let raw = "";
+    process.stdin.on("data", (chunk) => { raw += chunk; });
+    process.stdin.on("end", () => {
+      let ref = "", id = "";
+      try { const j = JSON.parse(raw); ref = j.ref || ""; id = (j.card && j.card.id) || ""; } catch (e) {}
+      const label = ref && id ? ref + " (" + id + ")" : (ref || id);
+      console.log(label || process.argv[1]);
+    });
+  ' "$2"
 }
 
 # JSON-escape backslashes, quotes, and embedded newlines.
@@ -86,8 +109,12 @@ case "$cmd" in
     [ -n "$PROJECT" ] && QS="project=$PROJECT"
     [ -n "$COLUMN" ]  && QS="${QS:+$QS&}column=$COLUMN"
     OUT="$(request GET "/tickets${QS:+?$QS}")"
-    # One ticket per line: id | column | priority | [project] title — agents and
-    # humans both read this; the raw JSON is available with the API directly.
+    # One ticket per line: ref | id | column | priority | [project] title.
+    # The ref leads because it's the name that also appears on the board, so
+    # it's what an agent should quote back to Koda; the id stays because it is
+    # the unambiguous key and because agents already parse this column. `ref`
+    # is computed by the server from js/ref.js — the same function the board
+    # renders with — so the CLI never reimplements the rule.
     # Parsed with node (already a dependency, for `node --test`) rather than sed:
     # the old regex split records on `},{` and pulled fields out with greedy
     # patterns, so any title or note containing a quote or `},{` silently lost
@@ -100,25 +127,31 @@ case "$cmd" in
       process.stdin.on("end", () => {
         const tickets = JSON.parse(raw).tickets || [];
         for (const t of tickets) {
+          const ref = String(t.ref ?? "").padEnd(12);
           const col = String(t.column ?? "").padEnd(7);
           const pri = String(t.priority ?? "").padEnd(4);
           const proj = t.project ? "[" + t.project + "] " : "";
-          console.log(t.id + " | " + col + " | " + pri + " | " + proj + (t.title ?? ""));
+          // Ids come in two lengths (t_<time>_<rand> and the older 13-char
+          // form), so pad or the later columns stagger.
+          const id = String(t.id ?? "").padEnd(16);
+          console.log(ref + " | " + id + " | " + col + " | " + pri + " | " + proj + (t.title ?? ""));
         }
       });
     '
     ;;
 
   move)
-    ID="${2:?usage: koder-ticket.sh move <id> <column>}"
-    COLUMN="${3:?usage: koder-ticket.sh move <id> <column>}"
-    request PATCH "/tickets/$ID" "{\"column\":\"$(json_escape "$COLUMN")\"}" > /dev/null
-    echo "moved $ID to $COLUMN"
+    # Either a ref or an id — the server resolves it (and refuses rather than
+    # guessing if a ref somehow matches two tickets).
+    ID="${2:?usage: koder-ticket.sh move <ref|id> <column>}"
+    COLUMN="${3:?usage: koder-ticket.sh move <ref|id> <column>}"
+    OUT="$(request PATCH "/tickets/$ID" "{\"column\":\"$(json_escape "$COLUMN")\"}")"
+    echo "moved $(describe "$OUT" "$ID") to $COLUMN"
     ;;
 
   edit)
     shift
-    ID="${1:?usage: koder-ticket.sh edit <id> [--title|--note|--priority|--project|--column <value>]}"
+    ID="${1:?usage: koder-ticket.sh edit <ref|id> [--title|--note|--priority|--project|--column <value>]}"
     shift
     # Only the options actually given go into the body; the server leaves
     # everything else on the ticket untouched. `${2?...}` rather than the
@@ -137,8 +170,16 @@ case "$cmd" in
       esac
     done
     [ -n "$FIELDS" ] || { echo "edit: pass at least one of --title/--note/--priority/--project/--column" >&2; exit 1; }
-    request PATCH "/tickets/$ID" "{${FIELDS#,}}" > /dev/null
-    echo "updated $ID"
+    OUT="$(request PATCH "/tickets/$ID" "{${FIELDS#,}}")"
+    echo "updated $(describe "$OUT" "$ID")"
+    ;;
+
+  delete|close)
+    ACTION="$cmd"
+    ID="${2:?usage: koder-ticket.sh $ACTION <ref|id>}"
+    [ $# -eq 2 ] || { echo "usage: koder-ticket.sh $ACTION <ref|id>" >&2; exit 1; }
+    OUT="$(request DELETE "/tickets/$ID")"
+    echo "deleted $(describe "$OUT" "$ID")"
     ;;
 
   -h|--help)
@@ -166,7 +207,6 @@ case "$cmd" in
     [ -n "$NOTE" ]     && BODY="$BODY,\"note\":\"$(json_escape "$NOTE")\""
     BODY="$BODY}"
     OUT="$(request POST /tickets "$BODY")"
-    ID="$(printf '%s' "$OUT" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')"
-    echo "created ticket ${ID:-?} in ${COLUMN:-backlog}${PROJECT:+ (project: $PROJECT)}"
+    echo "created ticket $(describe "$OUT" "?") in ${COLUMN:-backlog}${PROJECT:+ (project: $PROJECT)}"
     ;;
 esac

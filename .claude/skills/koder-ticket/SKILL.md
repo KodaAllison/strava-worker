@@ -30,7 +30,19 @@ session's environment configuration — don't guess values or hunt for them.
 
 ## Commands
 
-**List tickets** (one per line: `id | column | priority | [project] title`):
+### Refs vs ids
+
+Every ticket has two names:
+
+- The **ref** — `KODER-8CDA` — is printed on the card on Koda's board.
+- The **id** — `t_msa7ti8f_08cda` — is the internal key.
+
+**Always quote the ref when you tell Koda about a ticket.** An id means
+nothing to someone looking at the board; the ref is right there on the card.
+Use the id in notes that cross-reference other tickets, where precision beats
+readability. `move`, `edit`, `delete`, and `close` accept either.
+
+**List tickets** (one per line: `ref | id | column | priority | [project] title`):
 
 ```bash
 bash "$KT" list --project holitrackr --column todo
@@ -51,17 +63,17 @@ bash "$KT" "Fix flaky auth test" \
 Defaults: column `backlog`, priority `med`, project unassigned. When working
 inside one of Koda's repos, default `--project` to that repo's name.
 
-**Move a ticket:**
+**Move a ticket** (by ref or id):
 
 ```bash
-bash "$KT" move t_abc123_x1y2z doing
+bash "$KT" move KODER-8CDA doing
 ```
 
 **Edit a ticket** — fix a title, note, priority, project or column after the
 fact. Pass any subset of the options; anything you leave out stays as it is:
 
 ```bash
-bash "$KT" edit t_abc123_x1y2z \
+bash "$KT" edit KODER-8CDA \
   --title "Fix flaky auth test in CI" --priority high \
   --note "Only fails on the Windows runner; clock mock is the suspect."
 ```
@@ -71,13 +83,29 @@ wipes the note, `--project ""` unassigns the ticket. Use this instead of
 re-filing a ticket when the wording or metadata is wrong — re-filing loses the
 id other work already refers to. `--column` does the same thing as `move`.
 
+A ref is a truncation of the id, so it can in principle match two tickets. The
+server refuses that with a 409 listing both ids rather than patching one at
+random — pass the id when it happens.
+
+**Delete abandoned or superseded work** (by ref or id):
+
+```bash
+bash "$KT" delete KODER-8CDA
+```
+
+This is a hard delete, not a completion transition. Use it only when the work
+is no longer wanted; move shipped work to `done`. `close` is an exact alias for
+`delete` and has the same hard-delete semantics. A retained board snapshot can
+still restore the ticket for a limited time. Missing tickets return an error,
+so a retry cannot silently create another revision.
+
 ## The "pick up work" workflow
 
 When Koda says "look at the tickets on X and work on one":
 
 1. `list --project X --column todo` (fall back to `--column backlog` if empty)
 2. Pick the highest-priority ticket you can actually complete; tell Koda which
-   and why before starting
+   and why before starting — **by ref**, so it's findable on the board
 3. Move it to `doing`
 4. Do the work in the project repo, then commit, push, and open a PR
 5. Once the PR is up, move the ticket to `review` — **not** `done`. `done` is
@@ -99,14 +127,20 @@ ticket noting remaining work.
 If the CLI can't run, call the API directly with the same `KODER_API` /
 `KODER_TOKEN` values; all requests need `Authorization: Bearer $KODER_TOKEN`.
 
+`GET /tickets` returns each ticket's `ref` alongside its fields, and
+`PATCH /tickets/:id` takes a ref in place of an id — so the raw API gives you
+the same two names the CLI does.
+
 ```bash
 curl -sS -H "Authorization: Bearer $KODER_TOKEN" "${KODER_API%/}/tickets?project=holitrackr"
 curl -sS -X POST -H "Authorization: Bearer $KODER_TOKEN" -H 'Content-Type: application/json' \
   -d '{"title":"...","project":"...","column":"backlog"}' "${KODER_API%/}/tickets"
 curl -sS -X PATCH -H "Authorization: Bearer $KODER_TOKEN" -H 'Content-Type: application/json' \
-  -d '{"column":"doing"}' "${KODER_API%/}/tickets/<id>"
+  -d '{"column":"doing"}' "${KODER_API%/}/tickets/KODER-8CDA"
 curl -sS -X PATCH -H "Authorization: Bearer $KODER_TOKEN" -H 'Content-Type: application/json' \
   -d '{"title":"Better title","priority":"high"}' "${KODER_API%/}/tickets/<id>"
+curl -sS -X DELETE -H "Authorization: Bearer $KODER_TOKEN" \
+  "${KODER_API%/}/tickets/KODER-8CDA"
 ```
 
 Full API docs live in the koder repo: `server/README.md`.
